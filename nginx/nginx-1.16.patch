@@ -1,6 +1,6 @@
-From c466e7a968a130199adee030873dfd60d38bc664 Mon Sep 17 00:00:00 2001
+From 78702f6c5bc4b8bd7bc5ab690536ce5d8ca1d199 Mon Sep 17 00:00:00 2001
 From: Alessandro Ghedini <alessandro@cloudflare.com>
-Date: Thu, 22 Oct 2020 12:28:02 +0100
+Date: Tue, 14 Feb 2023 14:12:57 +0000
 Subject: [PATCH] Initial QUIC and HTTP/3 implementation using quiche
 
 ---
@@ -12,10 +12,11 @@ Subject: [PATCH] Initial QUIC and HTTP/3 implementation using quiche
  auto/make                               |    3 +-
  auto/modules                            |   44 +
  auto/options                            |    9 +
+ auto/unix                               |   12 +
  src/core/ngx_connection.h               |    7 +
  src/core/ngx_core.h                     |    3 +
- src/event/ngx_event_quic.c              |  625 +++++++
- src/event/ngx_event_quic.h              |   49 +
+ src/event/ngx_event_quic.c              |  732 ++++++++
+ src/event/ngx_event_quic.h              |   58 +
  src/event/ngx_event_udp.c               |    8 +
  src/http/modules/ngx_http_ssl_module.c  |   13 +-
  src/http/ngx_http.c                     |   33 +-
@@ -26,13 +27,14 @@ Subject: [PATCH] Initial QUIC and HTTP/3 implementation using quiche
  src/http/ngx_http_request.h             |    3 +
  src/http/ngx_http_request_body.c        |   33 +
  src/http/ngx_http_upstream.c            |   13 +
- src/http/v3/ngx_http_v3.c               | 2231 +++++++++++++++++++++++
- src/http/v3/ngx_http_v3.h               |   79 +
- src/http/v3/ngx_http_v3_filter_module.c |   68 +
- src/http/v3/ngx_http_v3_module.c        |  286 +++
+ src/http/v3/ngx_http_v3.c               | 2277 +++++++++++++++++++++++
+ src/http/v3/ngx_http_v3.h               |   80 +
+ src/http/v3/ngx_http_v3_filter_module.c |   74 +
+ src/http/v3/ngx_http_v3_module.c        |  289 +++
  src/http/v3/ngx_http_v3_module.h        |   34 +
- src/os/unix/ngx_udp_sendmsg_chain.c     |    1 +
- 28 files changed, 3746 insertions(+), 11 deletions(-)
+ src/os/unix/ngx_linux_config.h          |   10 +
+ src/os/unix/ngx_udp_sendmsg_chain.c     |  111 +-
+ 30 files changed, 4045 insertions(+), 21 deletions(-)
  create mode 100644 auto/lib/quiche/conf
  create mode 100644 auto/lib/quiche/make
  create mode 100644 src/event/ngx_event_quic.c
@@ -44,7 +46,7 @@ Subject: [PATCH] Initial QUIC and HTTP/3 implementation using quiche
  create mode 100644 src/http/v3/ngx_http_v3_module.h
 
 diff --git a/auto/lib/conf b/auto/lib/conf
-index 2c7af1040..abf920bae 100644
+index 2c7af104..abf920ba 100644
 --- a/auto/lib/conf
 +++ b/auto/lib/conf
 @@ -25,6 +25,10 @@ if [ $USE_OPENSSL = YES ]; then
@@ -59,7 +61,7 @@ index 2c7af1040..abf920bae 100644
      . auto/lib/zlib/conf
  fi
 diff --git a/auto/lib/make b/auto/lib/make
-index b64e32908..c8f34ae2e 100644
+index b64e3290..c8f34ae2 100644
 --- a/auto/lib/make
 +++ b/auto/lib/make
 @@ -11,6 +11,10 @@ if [ $OPENSSL != NONE -a $OPENSSL != NO -a $OPENSSL != YES ]; then
@@ -74,7 +76,7 @@ index b64e32908..c8f34ae2e 100644
      . auto/lib/zlib/make
  fi
 diff --git a/auto/lib/openssl/make b/auto/lib/openssl/make
-index 126a23875..139008207 100644
+index 126a2387..13900820 100644
 --- a/auto/lib/openssl/make
 +++ b/auto/lib/openssl/make
 @@ -49,11 +49,13 @@ END
@@ -98,7 +100,7 @@ index 126a23875..139008207 100644
  
 diff --git a/auto/lib/quiche/conf b/auto/lib/quiche/conf
 new file mode 100644
-index 000000000..23219d92a
+index 00000000..b853c1f1
 --- /dev/null
 +++ b/auto/lib/quiche/conf
 @@ -0,0 +1,23 @@
@@ -127,14 +129,14 @@ index 000000000..23219d92a
 +fi
 diff --git a/auto/lib/quiche/make b/auto/lib/quiche/make
 new file mode 100644
-index 000000000..6e5ede5bc
+index 00000000..636e1db1
 --- /dev/null
 +++ b/auto/lib/quiche/make
 @@ -0,0 +1,23 @@
 +
 +# Copyright (C) Cloudflare, Inc.
 +
-+QUICHE_COMMON_FLAGS="--package quiche --verbose --no-default-features --features ffi"
++QUICHE_COMMON_FLAGS="--package quiche --verbose --no-default-features --features ffi,sfv"
 +
 +# Default is release build
 +QUICHE_BUILD_FLAGS="$QUICHE_COMMON_FLAGS --release"
@@ -151,11 +153,11 @@ index 000000000..6e5ede5bc
 +$QUICHE/target/$QUICHE_BUILD_TARGET/libquiche.a: \\
 +		$OPENSSL/.openssl/include/openssl/ssl.h \\
 +		$NGX_MAKEFILE
-+	cd $QUICHE && cargo build $QUICHE_BUILD_FLAGS $QUICHE_OPT
++	cd $QUICHE && cargo build $QUICHE_BUILD_FLAGS
 +
 +END
 diff --git a/auto/make b/auto/make
-index 34c40cdd5..136c0a64e 100644
+index 34c40cdd..136c0a64 100644
 --- a/auto/make
 +++ b/auto/make
 @@ -7,7 +7,8 @@ echo "creating $NGX_MAKEFILE"
@@ -169,7 +171,7 @@ index 34c40cdd5..136c0a64e 100644
           $NGX_OBJS/src/mail \
           $NGX_OBJS/src/stream \
 diff --git a/auto/modules b/auto/modules
-index 09bfcb08d..2b2e6a889 100644
+index 09bfcb08..2b2e6a88 100644
 --- a/auto/modules
 +++ b/auto/modules
 @@ -134,6 +134,7 @@ if [ $HTTP = YES ]; then
@@ -252,7 +254,7 @@ index 09bfcb08d..2b2e6a889 100644
      ngx_module_type=CORE
      ngx_module_name=ngx_regex_module
 diff --git a/auto/options b/auto/options
-index d8b421b0f..6b443f048 100644
+index d8b421b0..6b443f04 100644
 --- a/auto/options
 +++ b/auto/options
 @@ -59,6 +59,7 @@ HTTP_CHARSET=YES
@@ -299,8 +301,31 @@ index d8b421b0f..6b443f048 100644
    --with-http_realip_module          enable ngx_http_realip_module
    --with-http_addition_module        enable ngx_http_addition_module
    --with-http_xslt_module            enable ngx_http_xslt_module
+diff --git a/auto/unix b/auto/unix
+index 43d3b25a..61e09740 100644
+--- a/auto/unix
++++ b/auto/unix
+@@ -434,6 +434,18 @@ ngx_feature_test="struct in_pktinfo  pkt;
+                   setsockopt(0, IPPROTO_IP, IP_PKTINFO, NULL, 0)"
+ . auto/feature
+ 
++# Linux UDP segmentation offloading
++
++ngx_feature="UDP_SEGMENT"
++ngx_feature_name="NGX_HAVE_UDP_SEGMENT"
++ngx_feature_run=no
++ngx_feature_incs="#include <sys/socket.h>
++                  /* Can use <netinet/udp.h> only with newer glibc */
++                  #include <linux/udp.h>"
++ngx_feature_path=
++ngx_feature_libs=
++ngx_feature_test="setsockopt(0, /* SOL_UDP */ 17, UDP_SEGMENT, NULL, 0)"
++. auto/feature
+ 
+ # RFC 3542 way to get IPv6 datagram destination address
+ 
 diff --git a/src/core/ngx_connection.h b/src/core/ngx_connection.h
-index 54059629e..7df8d4136 100644
+index 54059629..7df8d413 100644
 --- a/src/core/ngx_connection.h
 +++ b/src/core/ngx_connection.h
 @@ -79,6 +79,9 @@ struct ngx_listening_s {
@@ -325,7 +350,7 @@ index 54059629e..7df8d4136 100644
      socklen_t           local_socklen;
  
 diff --git a/src/core/ngx_core.h b/src/core/ngx_core.h
-index 93ca9174d..d0441f034 100644
+index 93ca9174..d0441f03 100644
 --- a/src/core/ngx_core.h
 +++ b/src/core/ngx_core.h
 @@ -82,6 +82,9 @@ typedef void (*ngx_connection_handler_pt)(ngx_connection_t *c);
@@ -340,10 +365,10 @@ index 93ca9174d..d0441f034 100644
  #include <ngx_module.h>
 diff --git a/src/event/ngx_event_quic.c b/src/event/ngx_event_quic.c
 new file mode 100644
-index 000000000..591a809e0
+index 00000000..5491eb1e
 --- /dev/null
 +++ b/src/event/ngx_event_quic.c
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,732 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -354,8 +379,8 @@ index 000000000..591a809e0
 +#include <ngx_event.h>
 +
 +
-+/* Limit outgoing packets to 1200 bytes. This is the minimum value allowed. */
-+#define MAX_DATAGRAM_SIZE 1200
++/* Max send burst limit */
++#define MAX_SEND_BURST_LIMIT 65507
 +
 +/* errors */
 +#define NGX_QUIC_NO_ERROR  0x0
@@ -375,7 +400,7 @@ index 000000000..591a809e0
 +static void ngx_quic_close_connection(ngx_connection_t *c);
 +
 +static ngx_int_t ngx_quic_send_udp_packet(ngx_connection_t *c, uint8_t *buf,
-+    size_t len);
++    size_t len, uint16_t segment_size);
 +
 +
 +static ngx_command_t  ngx_quic_commands[] = {
@@ -659,9 +684,15 @@ index 000000000..591a809e0
 +static void
 +ngx_quic_write_handler(ngx_event_t *wev)
 +{
-+    ngx_connection_t   *c;
-+    quiche_send_info    send_info;
-+    static uint8_t      out[MAX_DATAGRAM_SIZE];
++    bool               done;
++    int                rc;
++    size_t             total_written;
++    ssize_t            prev_written;
++    uint16_t           last_segment_size;
++    uint16_t           segment_size;
++    ngx_connection_t  *c;
++    quiche_send_info   send_info;
++    static uint8_t     out[MAX_SEND_BURST_LIMIT];
 +
 +    c = wev->data;
 +
@@ -683,12 +714,33 @@ index 000000000..591a809e0
 +        return;
 +    }
 +
-+    for (;;) {
-+        ssize_t written = quiche_conn_send(c->quic->conn, out, sizeof(out),
-+                                           &send_info);
++    /* Round down by MAX_DATAGRAM_SIZE. */
++    const size_t max_send_burst =
++        ngx_min(quiche_conn_send_quantum(c->quic->conn),
++                MAX_SEND_BURST_LIMIT)
++        / MAX_DATAGRAM_SIZE * MAX_DATAGRAM_SIZE;
 +
++    prev_written = 0;
++    total_written = 0;
++    segment_size = 0;
++    last_segment_size = 0;
++    done = 0;
++
++    for (;;) {
++        /* Make sure we don't exceed the max send burst limit. */
++        size_t max_len = ngx_min(max_send_burst - total_written,
++                                 MAX_DATAGRAM_SIZE);
++
++        ssize_t written = quiche_conn_send(c->quic->conn, out + total_written,
++                                           max_len, &send_info);
++
++        /* Flush and exit if there are no more packets to send. */
 +        if (written == QUICHE_ERR_DONE) {
 +            ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic done writing");
++
++            /* Nothing more to send. */
++            done = 1;
++
 +            break;
 +        }
 +
@@ -700,18 +752,93 @@ index 000000000..591a809e0
 +            return;
 +        }
 +
-+        int rc = ngx_quic_send_udp_packet(c, out, written);
++        total_written += written;
 +
-+        if (rc == NGX_AGAIN) {
++        /*
++         * segment_size is the first packet size in the loop, if
++         * there are 2 or more packets.
++         */
++        if (!segment_size) {
++            segment_size = written;
++
++            /* 1st packet timestamp is used when sending in a batch */
++            ngx_memcpy(&c->quic->send_info, &send_info, sizeof(quiche_send_info));
++        }
++
++        last_segment_size = written;
++
++        /* Flush and exit if the max burst limit is reached. */
++        if (total_written >= max_send_burst) {
 +            break;
 +        }
 +
-+        if (rc == NGX_ERROR) {
-+            ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0,
-+                           "failed to send quic packet");
++        /*
++         * Flush but keep sending if the packet size changes
++         * but the max burst limit isn't reached yet.
++         */
++        if (prev_written && written != prev_written) {
++            break;
++        }
 +
-+            ngx_quic_finalize_connection(c, NGX_QUIC_INTERNAL_ERROR);
-+            return;
++        prev_written = written;
++   }
++
++    /* Send packets to the network. */
++    if (total_written > 0) {
++        /*
++         * If the last segment size is bigger than the segment size,
++         * send packets with the same size using GSO (if available),
++         * and then send the last one separately at the end.
++         */
++        if (last_segment_size > segment_size) {
++            total_written -= last_segment_size;
++        }
++
++        rc = NGX_OK;
++
++#if (NGX_HAVE_UDP_SEGMENT)
++        {
++            rc = ngx_quic_send_udp_packet(c, out, total_written, segment_size);
++#else
++        for (size_t off = 0; off < total_written; off += segment_size) {
++            size_t len = (total_written - off) > segment_size
++                ? segment_size : (total_written - off);
++
++            rc = ngx_quic_send_udp_packet(c, out + off, len, 0);
++
++            if (rc == NGX_AGAIN) {
++                break;
++            }
++#endif
++
++            if (rc == NGX_ERROR) {
++                ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0,
++                    "failed to send quic packet");
++
++                ngx_quic_finalize_connection(c, NGX_QUIC_INTERNAL_ERROR);
++                return;
++            }
++        }
++
++        /* Send the last packet which is bigger than segment_size. */
++        if (rc == NGX_OK && last_segment_size > segment_size) {
++            rc = ngx_quic_send_udp_packet(c, out + total_written, last_segment_size, 0);
++
++            if (rc == NGX_ERROR) {
++                ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0,
++                        "failed to send quic packet");
++
++                ngx_quic_finalize_connection(c, NGX_QUIC_INTERNAL_ERROR);
++                return;
++            }
++        }
++
++        /* Still need to send more. Schedule to next worker cycle. */
++        if (!done) {
++            ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic pause writing");
++
++            wev->delayed = 1;
++            ngx_post_event(wev, &ngx_posted_delayed_events);
 +        }
 +    }
 +
@@ -806,7 +933,6 @@ index 000000000..591a809e0
 +ngx_quic_shutdown(ngx_connection_t *c)
 +{
 +    ssize_t           written;
-+    quiche_send_info  send_info;
 +    static uint8_t    out[MAX_DATAGRAM_SIZE];
 +
 +    /* Connection is closed, free memory. */
@@ -832,10 +958,10 @@ index 000000000..591a809e0
 +    /* Try sending a packet in order to flush pending frames (CONNECTION_CLOSE
 +     * for example), but ignore errors as we are already closing the connection
 +     * anyway. */
-+    written = quiche_conn_send(c->quic->conn, out, sizeof(out), &send_info);
++    written = quiche_conn_send(c->quic->conn, out, sizeof(out), &c->quic->send_info);
 +
 +    if (written > 0) {
-+        ngx_quic_send_udp_packet(c, out, written);
++        ngx_quic_send_udp_packet(c, out, written, 0);
 +    }
 +
 +    ngx_quic_set_timer(c);
@@ -933,7 +1059,7 @@ index 000000000..591a809e0
 +
 +
 +static ngx_int_t
-+ngx_quic_send_udp_packet(ngx_connection_t *c, uint8_t *buf, size_t len)
++ngx_quic_send_udp_packet(ngx_connection_t *c, uint8_t *buf, size_t len, uint16_t segment_size)
 +{
 +    ngx_buf_t     out_buf = {0};
 +    ngx_chain_t   out_chain = {0};
@@ -957,6 +1083,12 @@ index 000000000..591a809e0
 +
 +    c->write->ready = 1;
 +
++#if (NGX_HAVE_UDP_SEGMENT)
++    if (c->quic) {
++        c->quic->segment_size = segment_size;
++    }
++#endif
++
 +    cl = c->send_chain(c, &out_chain, 0);
 +
 +    if (cl != NULL) {
@@ -971,10 +1103,10 @@ index 000000000..591a809e0
 +}
 diff --git a/src/event/ngx_event_quic.h b/src/event/ngx_event_quic.h
 new file mode 100644
-index 000000000..b44a96320
+index 00000000..4362a955
 --- /dev/null
 +++ b/src/event/ngx_event_quic.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,58 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -992,6 +1124,9 @@ index 000000000..b44a96320
 +
 +#include <quiche.h>
 +
++/* Limit outgoing packets to 1200 bytes. This is the minimum value allowed. */
++#define MAX_DATAGRAM_SIZE 1200
++
 +typedef struct ngx_quic_s              ngx_quic_t;
 +typedef struct ngx_quic_connection_s   ngx_quic_connection_t;
 +
@@ -1004,6 +1139,12 @@ index 000000000..b44a96320
 +    quiche_conn                *conn;
 +
 +    ngx_connection_handler_pt   handler;
++
++#if (NGX_HAVE_UDP_SEGMENT)
++    uint16_t                    segment_size;
++#endif
++
++    quiche_send_info            send_info;
 +};
 +
 +
@@ -1025,7 +1166,7 @@ index 000000000..b44a96320
 +
 +#endif /* _NGX_EVENT_QUIC_H_INCLUDED_ */
 diff --git a/src/event/ngx_event_udp.c b/src/event/ngx_event_udp.c
-index 557283050..146275121 100644
+index 55728305..14627512 100644
 --- a/src/event/ngx_event_udp.c
 +++ b/src/event/ngx_event_udp.c
 @@ -276,6 +276,14 @@ ngx_event_recvmsg(ngx_event_t *ev)
@@ -1044,7 +1185,7 @@ index 557283050..146275121 100644
                                - ngx_cycle->free_connection_n;
  
 diff --git a/src/http/modules/ngx_http_ssl_module.c b/src/http/modules/ngx_http_ssl_module.c
-index b3f8f4795..00dd9c61a 100644
+index b3f8f479..00dd9c61 100644
 --- a/src/http/modules/ngx_http_ssl_module.c
 +++ b/src/http/modules/ngx_http_ssl_module.c
 @@ -371,7 +371,7 @@ ngx_http_ssl_alpn_select(ngx_ssl_conn_t *ssl_conn, const unsigned char **out,
@@ -1084,7 +1225,7 @@ index b3f8f4795..00dd9c61a 100644
          srv = (unsigned char *) NGX_HTTP_NPN_ADVERTISE;
          srvlen = sizeof(NGX_HTTP_NPN_ADVERTISE) - 1;
 diff --git a/src/http/ngx_http.c b/src/http/ngx_http.c
-index 79ef9c644..a29bff836 100644
+index 79ef9c64..a29bff83 100644
 --- a/src/http/ngx_http.c
 +++ b/src/http/ngx_http.c
 @@ -1141,6 +1141,7 @@ ngx_int_t
@@ -1195,7 +1336,7 @@ index 79ef9c644..a29bff836 100644
          if (addr[i].hash.buckets == NULL
              && (addr[i].wc_head == NULL
 diff --git a/src/http/ngx_http.h b/src/http/ngx_http.h
-index 8b43857ee..444f93536 100644
+index 8b43857e..444f9353 100644
 --- a/src/http/ngx_http.h
 +++ b/src/http/ngx_http.h
 @@ -20,6 +20,7 @@ typedef struct ngx_http_file_cache_s  ngx_http_file_cache_t;
@@ -1217,7 +1358,7 @@ index 8b43857ee..444f93536 100644
  #include <ngx_http_cache.h>
  #endif
 diff --git a/src/http/ngx_http_core_module.c b/src/http/ngx_http_core_module.c
-index cb49ef74a..1e991c0b3 100644
+index cb49ef74..1e991c0b 100644
 --- a/src/http/ngx_http_core_module.c
 +++ b/src/http/ngx_http_core_module.c
 @@ -4099,6 +4099,13 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
@@ -1235,7 +1376,7 @@ index cb49ef74a..1e991c0b3 100644
                             "invalid parameter \"%V\"", &value[n]);
          return NGX_CONF_ERROR;
 diff --git a/src/http/ngx_http_core_module.h b/src/http/ngx_http_core_module.h
-index 85f6d66dc..fa08e3631 100644
+index 85f6d66d..fa08e363 100644
 --- a/src/http/ngx_http_core_module.h
 +++ b/src/http/ngx_http_core_module.h
 @@ -82,6 +82,7 @@ typedef struct {
@@ -1263,7 +1404,7 @@ index 85f6d66dc..fa08e3631 100644
  
  
 diff --git a/src/http/ngx_http_request.c b/src/http/ngx_http_request.c
-index 80c19656f..a4f396753 100644
+index 80c19656..a4f39675 100644
 --- a/src/http/ngx_http_request.c
 +++ b/src/http/ngx_http_request.c
 @@ -64,6 +64,10 @@ static void ngx_http_ssl_handshake(ngx_event_t *rev);
@@ -1483,7 +1624,7 @@ index 80c19656f..a4f396753 100644
  
      if (c->ssl) {
 diff --git a/src/http/ngx_http_request.h b/src/http/ngx_http_request.h
-index fce70efe6..8ac19658c 100644
+index fce70efe..8ac19658 100644
 --- a/src/http/ngx_http_request.h
 +++ b/src/http/ngx_http_request.h
 @@ -24,6 +24,7 @@
@@ -1511,7 +1652,7 @@ index fce70efe6..8ac19658c 100644
      ngx_http_log_handler_pt           log_handler;
  
 diff --git a/src/http/ngx_http_request_body.c b/src/http/ngx_http_request_body.c
-index c4f092e59..220cd142f 100644
+index c4f092e5..220cd142 100644
 --- a/src/http/ngx_http_request_body.c
 +++ b/src/http/ngx_http_request_body.c
 @@ -312,6 +312,12 @@ ngx_http_do_read_client_request_body(ngx_http_request_t *r)
@@ -1583,7 +1724,7 @@ index c4f092e59..220cd142f 100644
          return ngx_http_request_body_chunked_filter(r, in);
  
 diff --git a/src/http/ngx_http_upstream.c b/src/http/ngx_http_upstream.c
-index a7391d09a..398af2797 100644
+index a7391d09..398af279 100644
 --- a/src/http/ngx_http_upstream.c
 +++ b/src/http/ngx_http_upstream.c
 @@ -526,6 +526,13 @@ ngx_http_upstream_init(ngx_http_request_t *r)
@@ -1615,10 +1756,10 @@ index a7391d09a..398af2797 100644
      if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
 diff --git a/src/http/v3/ngx_http_v3.c b/src/http/v3/ngx_http_v3.c
 new file mode 100644
-index 000000000..1a05d4e01
+index 00000000..f1691bbe
 --- /dev/null
 +++ b/src/http/v3/ngx_http_v3.c
-@@ -0,0 +1,2230 @@
+@@ -0,0 +1,2277 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -1643,6 +1784,8 @@ index 000000000..1a05d4e01
 +#define NGX_HTTP_V3_NO_ERROR                     0x0100
 +#define NGX_HTTP_V3_PROTOCOL_ERROR               0x0101
 +#define NGX_HTTP_V3_INTERNAL_ERROR               0x0102
++#define NGX_HTTP_V3_TRANSPORT_STREAM_INVALID     -1007
++#define NGX_HTTP_V3_TRANSPORT_STREAM_STOPPED     -1015
 +
 +
 +static void ngx_http_v3_handler(ngx_connection_t *c);
@@ -1936,6 +2079,11 @@ index 000000000..1a05d4e01
 +    int64_t                    stream_id;
 +
 +    while ((stream_id = quiche_conn_stream_writable_next(quic->conn)) >= 0) {
++        /* Skip over non-request streams. */
++        if ((stream_id & 0x2) != 0) {
++            continue;
++        }
++
 +        stream = ngx_http_v3_stream_lookup(h3c, stream_id);
 +
 +        if (stream == NULL) {
@@ -2011,7 +2159,20 @@ index 000000000..1a05d4e01
 +
 +        switch (quiche_h3_event_type(ev)) {
 +            case QUICHE_H3_EVENT_HEADERS: {
-+                ngx_http_v3_process_headers(c, ev, stream_id);
++                /* If there is no stream, these are headers. If there is a
++                 * stream, these are trailers and they are ignored.*/
++                stream = ngx_http_v3_stream_lookup(h3c, stream_id);
++
++                if (stream == NULL) {
++                    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0,
++                                   "http3 headers");
++
++                    ngx_http_v3_process_headers(c, ev, stream_id);
++                } else {
++                    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0,
++                                   "http3 trailers");
++                }
++
 +                break;
 +            }
 +
@@ -2282,6 +2443,10 @@ index 000000000..1a05d4e01
 +        ngx_http_free_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
 +        return NULL;
 +    }
++
++    /* Default value */
++    stream->priority.urgency = 3;
++    stream->priority.incremental = false;
 +
 +    r->qstream = stream;
 +
@@ -2888,6 +3053,7 @@ index 000000000..1a05d4e01
 +    ngx_connection_t          *c;
 +    ngx_http_request_body_t   *rb;
 +    ngx_http_core_loc_conf_t  *clcf;
++    bool                       stream_fin;
 +
 +    c = r->qstream->connection->connection;
 +
@@ -2916,7 +3082,9 @@ index 000000000..1a05d4e01
 +            break;
 +        }
 +
-+        if (ngx_buf_size(cl->buf) == 0) {
++        stream_fin = quiche_conn_stream_finished(c->quic->conn, r->qstream->id);
++
++        if ((ngx_buf_size(cl->buf) == 0) && !stream_fin) {
 +            continue;
 +        }
 +
@@ -2945,7 +3113,7 @@ index 000000000..1a05d4e01
 +            r->headers_in.content_length_n += size;
 +        }
 +
-+        if (quiche_conn_stream_finished(c->quic->conn, r->qstream->id)) {
++        if (stream_fin) {
 +            rb->rest = 0;
 +            b->last = cl->buf->pos;
 +            b->last_buf = 1;
@@ -3069,13 +3237,15 @@ index 000000000..1a05d4e01
 +    case NGX_HTTP_NO_CONTENT:
 +        r->header_only = 1;
 +
-+        ngx_str_null(&r->headers_out.content_type);
++        if (!r->headers_out.status_line.len) {
++            ngx_str_null(&r->headers_out.content_type);
 +
-+        r->headers_out.content_length = NULL;
-+        r->headers_out.content_length_n = -1;
++            r->headers_out.content_length = NULL;
++            r->headers_out.content_length_n = -1;
 +
-+        r->headers_out.last_modified_time = -1;
-+        r->headers_out.last_modified = NULL;
++            r->headers_out.last_modified_time = -1;
++            r->headers_out.last_modified = NULL;
++        }
 +        break;
 +
 +    case NGX_HTTP_PARTIAL_CONTENT:
@@ -3435,9 +3605,10 @@ index 000000000..1a05d4e01
 +    fin = r->header_only
 +          || (r->headers_out.content_length_n == 0 && !r->expect_trailers);
 +
-+    rc = quiche_h3_send_response(h3c->h3, c->quic->conn, r->qstream->id,
++    rc = quiche_h3_send_response_with_priority(h3c->h3, c->quic->conn, r->qstream->id,
 +                                 r->qstream->headers->elts,
 +                                 r->qstream->headers->nelts,
++                                 &r->qstream->priority,
 +                                 fin);
 +
 +    if (rc == QUICHE_H3_ERR_STREAM_BLOCKED) {
@@ -3462,7 +3633,7 @@ index 000000000..1a05d4e01
 +
 +    r->qstream->headers_sent = 1;
 +
-+    if (r->done) {
++    if (r->done && r->main->count == 0) {
 +        fc->write->handler = ngx_http_v3_close_stream_handler;
 +        fc->read->handler = ngx_http_empty_handler;
 +    }
@@ -3509,7 +3680,13 @@ index 000000000..1a05d4e01
 +    }
 +
 +    if (n < 0) {
-+        ngx_log_error(NGX_LOG_ERR, fc->log, 0, "stream write failed: %d", n);
++        if (n == NGX_HTTP_V3_TRANSPORT_STREAM_INVALID ||
++            n == NGX_HTTP_V3_TRANSPORT_STREAM_STOPPED ) {
++            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, fc->log, 0, "stream write failed: %d", n);
++        } else {
++            ngx_log_error(NGX_LOG_ERR, fc->log, 0, "stream write failed: %d", n);
++        }
++
 +        return NGX_ERROR;
 +    }
 +
@@ -3669,10 +3846,11 @@ index 000000000..1a05d4e01
 +ngx_http_v3_close_stream(ngx_http_v3_stream_t *stream, ngx_int_t rc)
 +{
 +    ngx_event_t               *ev;
-+    ngx_connection_t          *fc;
++    ngx_connection_t          *c, *fc;
 +    ngx_http_v3_connection_t  *h3c;
 +
 +    h3c = stream->connection;
++    c = h3c->connection;
 +
 +    fc = stream->request->connection;
 +
@@ -3686,7 +3864,17 @@ index 000000000..1a05d4e01
 +    }
 +
 +    quiche_conn_stream_shutdown(h3c->connection->quic->conn, stream->id,
-+                                QUICHE_SHUTDOWN_READ, 0);
++                                QUICHE_SHUTDOWN_READ, NGX_HTTP_V3_NO_ERROR);
++
++    /* If the stream has closed, a QUIC stream FIN was sent. In that case don't
++       send RESET_STREAM or else we risk data loss on the client side.*/
++    if (!stream->out_closed) {
++        quiche_conn_stream_shutdown(h3c->connection->quic->conn, stream->id,
++                                QUICHE_SHUTDOWN_WRITE, NGX_HTTP_V3_NO_ERROR);
++    }
++
++    /* Post a connection write event to flush QUIC frames */
++    ngx_post_event(c->write, &ngx_posted_events);
 +
 +    ngx_rbtree_delete(&h3c->streams, &stream->node);
 +
@@ -3761,7 +3949,7 @@ index 000000000..1a05d4e01
 +
 +    quiche_conn_stream_shutdown(h3c->connection->quic->conn,
 +                                stream->id,
-+                                QUICHE_SHUTDOWN_READ, rc);
++                                QUICHE_SHUTDOWN_READ, NGX_HTTP_V3_NO_ERROR);
 +}
 +
 +
@@ -3851,10 +4039,10 @@ index 000000000..1a05d4e01
 +}
 diff --git a/src/http/v3/ngx_http_v3.h b/src/http/v3/ngx_http_v3.h
 new file mode 100644
-index 000000000..f8415a999
+index 00000000..2ca965fd
 --- /dev/null
 +++ b/src/http/v3/ngx_http_v3.h
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,80 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -3893,11 +4081,12 @@ index 000000000..f8415a999
 +    ngx_connection_t           *free_fake_connections;
 +};
 +
-+
 +struct ngx_http_v3_stream_s {
 +    ngx_rbtree_node_t          node;
 +
 +    uint64_t                   id;
++
++    quiche_h3_priority         priority;
 +
 +    ngx_http_request_t        *request;
 +
@@ -3936,10 +4125,10 @@ index 000000000..f8415a999
 +#endif /* _NGX_HTTP_V3_H_INCLUDED_ */
 diff --git a/src/http/v3/ngx_http_v3_filter_module.c b/src/http/v3/ngx_http_v3_filter_module.c
 new file mode 100644
-index 000000000..5bbff8602
+index 00000000..7cba7053
 --- /dev/null
 +++ b/src/http/v3/ngx_http_v3_filter_module.c
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,74 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -3996,6 +4185,12 @@ index 000000000..5bbff8602
 +        return ngx_http_next_header_filter(r);
 +    }
 +
++    r->header_sent = 1;
++
++    if (r != r->main) {
++        return NGX_OK;
++    }
++
 +    return ngx_http_v3_send_response(r);
 +}
 +
@@ -4010,10 +4205,10 @@ index 000000000..5bbff8602
 +}
 diff --git a/src/http/v3/ngx_http_v3_module.c b/src/http/v3/ngx_http_v3_module.c
 new file mode 100644
-index 000000000..30955c4cd
+index 00000000..cf7c8252
 --- /dev/null
 +++ b/src/http/v3/ngx_http_v3_module.c
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,289 @@
 +
 +/*
 + * Copyright (C) Cloudflare, Inc.
@@ -4217,6 +4412,9 @@ index 000000000..30955c4cd
 +        return NGX_CONF_ERROR;
 +    }
 +
++    quiche_config_set_max_send_udp_payload_size(conf->quic.config,
++                                                MAX_DATAGRAM_SIZE);
++
 +    quiche_config_set_max_idle_timeout(conf->quic.config, conf->idle_timeout);
 +
 +    quiche_config_set_initial_max_data(conf->quic.config, conf->max_data);
@@ -4302,7 +4500,7 @@ index 000000000..30955c4cd
 +}
 diff --git a/src/http/v3/ngx_http_v3_module.h b/src/http/v3/ngx_http_v3_module.h
 new file mode 100644
-index 000000000..72e189def
+index 00000000..3c15d4fe
 --- /dev/null
 +++ b/src/http/v3/ngx_http_v3_module.h
 @@ -0,0 +1,34 @@
@@ -4325,7 +4523,7 @@ index 000000000..72e189def
 +typedef struct {
 +    ngx_quic_t                      quic;
 +
-+    quiche_h3_config                *http3;
++    quiche_h3_config               *http3;
 +
 +    ngx_msec_t                      idle_timeout;
 +    size_t                          max_data;
@@ -4340,11 +4538,201 @@ index 000000000..72e189def
 +
 +
 +#endif /* _NGX_HTTP_V3_MODULE_H_INCLUDED_ */
+diff --git a/src/os/unix/ngx_linux_config.h b/src/os/unix/ngx_linux_config.h
+index 3036caeb..c3a20700 100644
+--- a/src/os/unix/ngx_linux_config.h
++++ b/src/os/unix/ngx_linux_config.h
+@@ -104,6 +104,16 @@ typedef struct iocb  ngx_aiocb_t;
+ #endif
+ 
+ 
++#if (NGX_HAVE_UDP_SEGMENT)
++#include <netinet/udp.h>
++#endif
++
++
++#if (NGX_HAVE_SO_TXTIME)
++#include <linux/net_tstamp.h>
++#endif
++
++
+ #define NGX_LISTEN_BACKLOG        511
+ 
+ 
 diff --git a/src/os/unix/ngx_udp_sendmsg_chain.c b/src/os/unix/ngx_udp_sendmsg_chain.c
-index 5399c7916..9b03ca536 100644
+index 5399c791..d2741974 100644
 --- a/src/os/unix/ngx_udp_sendmsg_chain.c
 +++ b/src/os/unix/ngx_udp_sendmsg_chain.c
-@@ -315,6 +315,7 @@ eintr:
+@@ -10,6 +10,11 @@
+ #include <ngx_event.h>
+ 
+ 
++#ifndef UDP_SEGMENT
++#define UDP_SEGMENT  103
++#endif
++
++
+ static ngx_chain_t *ngx_udp_output_chain_to_iovec(ngx_iovec_t *vec,
+     ngx_chain_t *in, ngx_log_t *log);
+ static ssize_t ngx_sendmsg(ngx_connection_t *c, ngx_iovec_t *vec);
+@@ -199,20 +204,25 @@ ngx_udp_output_chain_to_iovec(ngx_iovec_t *vec, ngx_chain_t *in, ngx_log_t *log)
+ static ssize_t
+ ngx_sendmsg(ngx_connection_t *c, ngx_iovec_t *vec)
+ {
+-    ssize_t        n;
+-    ngx_err_t      err;
+-    struct msghdr  msg;
++    ssize_t          n;
++    ngx_err_t        err;
++    struct msghdr    msg;
++    struct cmsghdr  *cmsg = NULL;
+ 
+ #if (NGX_HAVE_MSGHDR_MSG_CONTROL)
+ 
+ #if (NGX_HAVE_IP_SENDSRCADDR)
+     u_char         msg_control[CMSG_SPACE(sizeof(struct in_addr))];
+ #elif (NGX_HAVE_IP_PKTINFO)
+-    u_char         msg_control[CMSG_SPACE(sizeof(struct in_pktinfo))];
++    u_char         msg_control[CMSG_SPACE(sizeof(struct in_pktinfo) +
++                               CMSG_SPACE(sizeof(uint16_t)) +
++                               CMSG_SPACE(sizeof(uint64_t)))];
+ #endif
+ 
+ #if (NGX_HAVE_INET6 && NGX_HAVE_IPV6_RECVPKTINFO)
+-    u_char         msg_control6[CMSG_SPACE(sizeof(struct in6_pktinfo))];
++    u_char         msg_control6[CMSG_SPACE(sizeof(struct in6_pktinfo)) +
++                                CMSG_SPACE(sizeof(uint16_t)) +
++                                CMSG_SPACE(sizeof(uint64_t))];
+ #endif
+ 
+ #endif
+@@ -234,7 +244,6 @@ ngx_sendmsg(ngx_connection_t *c, ngx_iovec_t *vec)
+ #if (NGX_HAVE_IP_SENDSRCADDR)
+ 
+         if (c->local_sockaddr->sa_family == AF_INET) {
+-            struct cmsghdr      *cmsg;
+             struct in_addr      *addr;
+             struct sockaddr_in  *sin;
+ 
+@@ -255,12 +264,13 @@ ngx_sendmsg(ngx_connection_t *c, ngx_iovec_t *vec)
+ #elif (NGX_HAVE_IP_PKTINFO)
+ 
+         if (c->local_sockaddr->sa_family == AF_INET) {
+-            struct cmsghdr      *cmsg;
+             struct in_pktinfo   *pkt;
+             struct sockaddr_in  *sin;
+ 
++            ngx_memzero(&msg_control, sizeof(msg_control));
++
+             msg.msg_control = &msg_control;
+-            msg.msg_controllen = sizeof(msg_control);
++            msg.msg_controllen = CMSG_SPACE(sizeof(struct in_pktinfo));
+ 
+             cmsg = CMSG_FIRSTHDR(&msg);
+             cmsg->cmsg_level = IPPROTO_IP;
+@@ -279,12 +289,13 @@ ngx_sendmsg(ngx_connection_t *c, ngx_iovec_t *vec)
+ #if (NGX_HAVE_INET6 && NGX_HAVE_IPV6_RECVPKTINFO)
+ 
+         if (c->local_sockaddr->sa_family == AF_INET6) {
+-            struct cmsghdr       *cmsg;
+             struct in6_pktinfo   *pkt6;
+             struct sockaddr_in6  *sin6;
+ 
++            ngx_memzero(&msg_control6, sizeof(msg_control6));
++
+             msg.msg_control = &msg_control6;
+-            msg.msg_controllen = sizeof(msg_control6);
++            msg.msg_controllen = CMSG_SPACE(sizeof(struct in6_pktinfo));
+ 
+             cmsg = CMSG_FIRSTHDR(&msg);
+             cmsg->cmsg_level = IPPROTO_IPV6;
+@@ -301,6 +312,85 @@ ngx_sendmsg(ngx_connection_t *c, ngx_iovec_t *vec)
+ #endif
+     }
+ 
++#if (NGX_QUIC && NGX_HAVE_UDP_SEGMENT)
++
++    if (c->quic && c->quic->segment_size &&
++        c->local_sockaddr &&
++        (c->local_sockaddr->sa_family == AF_INET ||
++         c->local_sockaddr->sa_family == AF_INET6))
++    {
++
++        if (cmsg == NULL) {
++            if (c->local_sockaddr->sa_family == AF_INET) {
++                ngx_memzero(&msg_control, sizeof(msg_control));
++                msg.msg_control = &msg_control;
++            } else {
++                ngx_memzero(&msg_control6, sizeof(msg_control6));
++                msg.msg_control = &msg_control6;
++            }
++
++            msg.msg_controllen = CMSG_SPACE(sizeof(uint16_t));
++
++            cmsg = CMSG_FIRSTHDR(&msg);
++
++        } else {
++            msg.msg_controllen += CMSG_SPACE(sizeof(uint16_t));
++
++            cmsg = CMSG_NXTHDR(&msg, cmsg);
++        }
++
++        cmsg->cmsg_level = SOL_UDP;
++        cmsg->cmsg_type = UDP_SEGMENT;
++        cmsg->cmsg_len = CMSG_LEN(sizeof(uint16_t));
++
++        ngx_memcpy(CMSG_DATA(cmsg), &c->quic->segment_size, sizeof(uint16_t));
++    }
++
++#endif
++
++#if (NGX_QUIC && NGX_HAVE_SO_TXTIME)
++
++    ngx_listening_t  *ls = c->listening;
++
++    if (c->quic && ls && ls->quic_so_txtime &&
++        c->local_sockaddr &&
++        (c->local_sockaddr->sa_family == AF_INET ||
++         c->local_sockaddr->sa_family == AF_INET6)) {
++        uint64_t timestamp_ns;
++
++        if (cmsg == NULL) {
++            if (c->local_sockaddr->sa_family == AF_INET) {
++                ngx_memzero(&msg_control, sizeof(msg_control));
++                msg.msg_control = &msg_control;
++            } else {
++                ngx_memzero(&msg_control6, sizeof(msg_control6));
++                msg.msg_control = &msg_control6;
++            }
++
++            msg.msg_controllen = CMSG_SPACE(sizeof(uint64_t));
++
++            cmsg = CMSG_FIRSTHDR(&msg);
++
++        } else {
++            msg.msg_controllen += CMSG_SPACE(sizeof(uint64_t));
++
++            cmsg = CMSG_NXTHDR(&msg, cmsg);
++        }
++
++        cmsg->cmsg_level = SOL_SOCKET;
++        cmsg->cmsg_type = SCM_TXTIME;
++        cmsg->cmsg_len = CMSG_LEN(sizeof(uint64_t));
++
++        /* Convert struct timespec to nanoseconds. */
++        timestamp_ns = c->quic->send_info.at.tv_sec *
++                       (1000ULL * 1000 * 1000) +
++                       c->quic->send_info.at.tv_nsec;
++
++        ngx_memcpy(CMSG_DATA(cmsg), &timestamp_ns, sizeof(uint64_t));
++    }
++
++#endif
++
+ #endif
+ 
+ eintr:
+@@ -315,6 +405,7 @@ eintr:
  
          switch (err) {
          case NGX_EAGAIN:
@@ -4353,5 +4741,5 @@ index 5399c7916..9b03ca536 100644
                             "sendmsg() not ready");
              return NGX_AGAIN;
 -- 
-2.32.0
+2.39.1
 
