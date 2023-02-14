@@ -4374,13 +4374,14 @@ impl Connection {
             self.blocked_limit = Some(self.max_tx_data);
         }
 
+        let cap = self.tx_cap;
+
         // Truncate the input buffer based on the connection's send capacity if
         // necessary.
         //
         // When the cap is zero, the method returns Ok(0) *only* when the passed
         // buffer is empty. We return Error::Done otherwise.
-        let cap = self.tx_cap;
-        if cap == 0 && !(fin && buf.is_empty()) {
+        if cap == 0 && !buf.is_empty() {
             return Err(Error::Done);
         }
 
@@ -4600,6 +4601,28 @@ impl Connection {
         Err(Error::InvalidStreamState(stream_id))
     }
 
+    /// Returns the next stream that has data to read.
+    ///
+    /// Note that once returned by this method, a stream ID will not be returned
+    /// again until it is "re-armed".
+    ///
+    /// The application will need to read all of the pending data on the stream,
+    /// and new data has to be received before the stream is reported again.
+    ///
+    /// This is unlike the [`readable()`] method, that returns the same list of
+    /// readable streams when called multiple times in succession.
+    ///
+    /// [`readable()`]: struct.Connection.html#method.readable
+    pub fn stream_readable_next(&mut self) -> Option<u64> {
+        if let Some(&stream_id) = self.streams.readable.iter().next() {
+            self.streams.mark_readable(stream_id, false);
+
+            Some(stream_id)
+        } else {
+            None
+        }
+    }
+
     /// Returns true if the stream has data that can be read.
     pub fn stream_readable(&self, stream_id: u64) -> bool {
         let stream = match self.streams.get(stream_id) {
@@ -4609,6 +4632,50 @@ impl Connection {
         };
 
         stream.is_readable()
+    }
+
+    /// Returns the next stream that can be written to.
+    ///
+    /// Note that once returned by this method, a stream ID will not be returned
+    /// again until it is "re-armed".
+    ///
+    /// The application will need to fill the stream's buffer and flush the data
+    /// on the wire before the stream is reported again.
+    ///
+    /// This is unlike the [`writable()`] method, that returns the same list of
+    /// writable streams when called multiple times in succession.
+    ///
+    /// [`stream_writable()`]: struct.Connection.html#method.stream_writable
+    /// [`writable()`]: struct.Connection.html#method.writable
+    pub fn stream_writable_next(&mut self) -> Option<u64> {
+        // If there is not enough connection-level send capacity, none of the
+        // streams are writable.
+        if self.tx_cap == 0 {
+            return None;
+        }
+
+        for &stream_id in &self.streams.writable {
+            if let Some(stream) = self.streams.get(stream_id) {
+                let cap = match stream.send.cap() {
+                    Ok(v) => v,
+
+                    // Return the stream to the application immediately if it's
+                    // stopped.
+                    Err(_) =>
+                        return {
+                            self.streams.mark_writable(stream_id, false);
+                            Some(stream_id)
+                        },
+                };
+
+                if cmp::min(self.tx_cap, cap) >= stream.send_lowat {
+                    self.streams.mark_writable(stream_id, false);
+                    return Some(stream_id);
+                }
+            }
+        }
+
+        None
     }
 
     /// Returns true if the stream has enough send capacity.
@@ -4642,6 +4709,8 @@ impl Connection {
 
             None => return Err(Error::InvalidStreamState(stream_id)),
         };
+
+        stream.send_lowat = len;
 
         if self.max_tx_data - self.tx_data < len as u64 {
             self.blocked_limit = Some(self.max_tx_data);
