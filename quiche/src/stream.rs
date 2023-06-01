@@ -1305,6 +1305,11 @@ impl SendBuf {
         self.acked.insert(off..off + len as u64);
     }
 
+    /// Returns acked attribute.
+    pub fn acked(&self) -> &ranges::RangeSet {
+        &self.acked
+    }
+
     pub fn ack_and_drop(&mut self, off: u64, len: usize) {
         self.ack(off, len);
 

@@ -389,6 +389,9 @@ int64_t quiche_conn_stream_writable_next(quiche_conn *conn);
 // Returns true if all the data has been read from the specified stream.
 bool quiche_conn_stream_finished(const quiche_conn *conn, uint64_t stream_id);
 
+// Returns number of acked bytes on the specified stream.
+uint64_t quiche_conn_stream_count_acked(const quiche_conn *conn, uint64_t stream_id);
+
 typedef struct quiche_stream_iter quiche_stream_iter;
 
 // Returns an iterator over streams that have outstanding data to read.

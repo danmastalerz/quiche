@@ -4955,6 +4955,24 @@ impl Connection {
         stream.recv.is_fin()
     }
 
+    /// Returns number of acked bytes on the stream.
+    #[inline]
+    pub fn stream_count_acked(&self, stream_id: u64) -> u64 {
+        let stream = match self.streams.get(stream_id) {
+            Some(v) => v,
+
+            None => return 0,
+        };
+
+        let off = match stream.send.acked().last() {
+            Some(v) => v,
+
+            None => return 0,
+        };
+
+        off + 1
+    }
+
     /// Returns the number of bidirectional streams that can be created
     /// before the peer's stream count limit is reached.
     ///
