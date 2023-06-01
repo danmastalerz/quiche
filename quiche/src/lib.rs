@@ -4955,8 +4955,7 @@ impl Connection {
         stream.recv.is_fin()
     }
 
-    /// Returns true if the stream's write buffer is empty, false otherwise.
-    /// If stream doesn't exist, then true is returned.
+    /// Returns true if there is some data to be sent inside the given quic stream, false otherwise.
     #[inline]
     pub fn stream_flushed(&self, stream_id: u64) -> bool {
         let stream = match self.streams.get(stream_id) {
@@ -4965,7 +4964,7 @@ impl Connection {
             None => return true,
         };
 
-        stream.send.ready()
+        !stream.send.ready()
     }
 
     /// Returns the number of bidirectional streams that can be created
