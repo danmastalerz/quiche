@@ -1503,7 +1503,7 @@ impl SendBuf {
     }
 
     /// Returns true if there is data to be written.
-    fn ready(&self) -> bool {
+    pub fn ready(&self) -> bool {
         !self.data.is_empty() && self.off_front() < self.off
     }
 

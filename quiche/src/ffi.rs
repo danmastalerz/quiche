@@ -868,6 +868,13 @@ pub extern fn quiche_conn_stream_finished(
 }
 
 #[no_mangle]
+pub extern fn quiche_conn_stream_flushed(
+    conn: &Connection, stream_id: u64,
+) -> bool {
+    conn.stream_flushed(stream_id)
+}
+
+#[no_mangle]
 pub extern fn quiche_conn_readable(conn: &Connection) -> *mut StreamIter {
     Box::into_raw(Box::new(conn.readable()))
 }
